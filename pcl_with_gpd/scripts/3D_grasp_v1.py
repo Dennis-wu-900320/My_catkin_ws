@@ -23,17 +23,15 @@ import math
 import sys
 sys.path.append('/home/chen/catkin_ws/src')  # 將 src 加入模組路徑
 from robot_control import *
-from collections import defaultdict
 
 # from node_control.script.listen_python_move_to_fixture import new_monitor,move_send_script
 from gpd_ros.msg import GraspConfigList
 
-class_names_dict={0: 'aluextru', 1: 'bin', 2: 'twpipe',3:'unknown'}  
+class_names_dict={0: 'aluextru', 1: 'bin', 2: 'twpipe'}
 class_colors = {
     0: (255, 0, 0),   # 類別 0 - 紅色
     1: (0, 255, 0),   # 類別 1 - 綠色
     2: (0, 0, 255),   # 類別 2 - 藍色
-    3:(127.5,127.5,127.5), # 類別 3 - 灰色
     # 添加更多類別顏色
 }
 
@@ -52,7 +50,7 @@ class view_point_cloud:
         self.depth_image=depth_image
         self.mark_image,self.mask_pixel_list,self.class_id_list,self.confidence_score_list=self.get_mask_data_accurate(color_image)
         
-        self.all_instance_points,self.all_instance_original_colors,self.all_instance_draw_colors=self.merge_mask_points_v2()
+        self.all_instance_points,self.all_instance_original_colors,self.all_instance_draw_colors=self.merge_mask_points()
     
         self.o3d_pcd=self.generate_o3d_pointcloud()
         
@@ -287,107 +285,6 @@ class view_point_cloud:
         self.all_instance_draw_colors = all_instance_draw_colors
         return all_instance_points, all_instance_original_colors, all_instance_draw_colors
     
-    def merge_mask_points_v1(self):
-        all_instance_points = []
-        all_instance_original_colors = []
-        all_instance_draw_colors = []
-
-        # ========== 蒐集所有 mask 的像素 ==========
-        all_mask_coords = set()
-
-        for i, pix2d in enumerate(self.mask_pixel_list):
-            for x, y in pix2d:
-                all_mask_coords.add((x, y))
-
-        # ========== 整張影像中的有效像素 ==========
-        h, w = self.depth_image.shape
-        all_coords = [(x, y) for y in range(h) for x in range(w) if self.depth_image[y, x] > 0]
-
-        # ========== 找出背景像素 ==========
-        background_coords = [np.array([x, y]) for (x, y) in all_coords if (x, y) not in all_mask_coords]
-        if background_coords:
-            background_coords = np.array(background_coords)
-            bg_pts3d = self.pixel_to_3d_points(background_coords, self.depth_image, self.intrinsics)
-            all_instance_points.append(bg_pts3d)
-
-            bg_color = [0.5, 0.5, 0.5]  # 背景給灰色
-            all_instance_draw_colors.extend([bg_color] * len(bg_pts3d))
-
-            bg_original_colors = self.color_image[background_coords[:, 1], background_coords[:, 0]] / 255.0
-            all_instance_original_colors.extend(bg_original_colors)
-
-        # ========== 處理每個實例 ==========
-        for i, pix2d in enumerate(self.mask_pixel_list):
-            valid_pix2d = pix2d[self.depth_image[pix2d[:, 1], pix2d[:, 0]] > 0]
-            pts3d = self.pixel_to_3d_points(valid_pix2d, self.depth_image, self.intrinsics)
-            all_instance_points.append(pts3d)
-
-            class_name = self.class_id_list[i]
-            class_index = next((k for k, v in class_names_dict.items() if v == class_name), None)
-            color = class_colors.get(class_index, (255, 255, 255))
-            normalized_color = [c / 255.0 for c in color]
-            all_instance_draw_colors.extend([normalized_color] * len(pts3d))
-
-            original_colors = self.color_image[valid_pix2d[:, 1], valid_pix2d[:, 0]]
-            normalized_colors = original_colors / 255.0
-            all_instance_original_colors.extend(normalized_colors)
-
-        self.all_instance_points = all_instance_points
-        self.all_instance_original_colors = all_instance_original_colors
-        self.all_instance_draw_colors = all_instance_draw_colors
-        return all_instance_points, all_instance_original_colors, all_instance_draw_colors
-
-    def merge_mask_points_v2(self):
-        all_instance_points = []
-        all_instance_original_colors = []
-        all_instance_draw_colors = []
-
-        # === 蒐集所有前景實例的像素座標 ===
-        foreground_coords_set = set()
-        for pix2d in self.mask_pixel_list:
-            for x, y in pix2d:
-                foreground_coords_set.add((x, y))  # 轉為 tuple 以便快速查找
-
-        # === 全圖有效深度點座標 ===
-        h, w = self.depth_image.shape
-        all_coords = [(x, y) for y in range(h) for x in range(w) if self.depth_image[y, x] > 0]
-
-        # === 從 all_coords 中排除 foreground → 得到背景像素 ===
-        background_coords = [np.array([x, y]) for (x, y) in all_coords if (x, y) not in foreground_coords_set]
-
-        if background_coords:
-            background_coords = np.array(background_coords)
-            bg_pts3d = self.pixel_to_3d_points(background_coords, self.depth_image, self.intrinsics)
-            all_instance_points.append(bg_pts3d)
-
-            bg_color = [0.5, 0.5, 0.5]  # 背景給灰色
-            all_instance_draw_colors.extend([bg_color] * len(bg_pts3d))
-
-            bg_original_colors = self.color_image[background_coords[:, 1], background_coords[:, 0]] / 255.0
-            all_instance_original_colors.extend(bg_original_colors)
-
-        # === 處理每個實例的點雲 ===
-        for i, pix2d in enumerate(self.mask_pixel_list):
-            valid_pix2d = pix2d[self.depth_image[pix2d[:, 1], pix2d[:, 0]] > 0]  # 去除深度無效點
-            pts3d = self.pixel_to_3d_points(valid_pix2d, self.depth_image, self.intrinsics)
-            all_instance_points.append(pts3d)
-
-            class_name = self.class_id_list[i]
-            class_index = next((k for k, v in class_names_dict.items() if v == class_name), None)
-            color = class_colors.get(class_index, (255, 255, 255))
-            normalized_color = [c / 255.0 for c in color]
-            all_instance_draw_colors.extend([normalized_color] * len(pts3d))
-
-            original_colors = self.color_image[valid_pix2d[:, 1], valid_pix2d[:, 0]] / 255.0
-            all_instance_original_colors.extend(original_colors)
-
-        # === 最終結果保存 ===
-        self.all_instance_points = all_instance_points
-        self.all_instance_original_colors = all_instance_original_colors
-        self.all_instance_draw_colors = all_instance_draw_colors
-        return all_instance_points, all_instance_original_colors, all_instance_draw_colors
-
-    
     def generate_o3d_pointcloud(self):
         np_all_instance_points = np.vstack(self.all_instance_points)
         np_all_instance_original_colors = np.array(self.all_instance_original_colors)[:,::-1]
@@ -620,33 +517,6 @@ def collision_detect_z(position, approach, binormal, axis, bbox_id,
     
     return z_compensation_mm, is_danger
 
-def classify_grasp_color_by_counts(colors_in_box, class_colors, class_names_dict):
-    """
-    根據點雲中的顏色統計，決定哪一類顏色在該 grasp 中占比最高。
-    :param colors_in_box: (N, 3) numpy array of float RGB values [0,1]
-    :param class_colors: dict[class_id] = (R, G, B) 255 scale
-    :param class_names_dict: dict[class_id] = "name"
-    :return: class_name (str)
-    """
-    counts = defaultdict(int)
-
-    # Normalize class colors
-    class_colors_normalized = {
-        class_id: np.array(rgb) / 255.0 for class_id, rgb in class_colors.items()
-    }
-
-    for color in colors_in_box:
-        for class_id, class_color in class_colors_normalized.items():
-            if np.allclose(color, class_color, atol=0.1):
-                counts[class_id] += 1
-                break
-
-    if counts:
-        # 找出最多票的類別
-        max_class_id = max(counts.items(), key=lambda x: x[1])[0]
-        return class_names_dict.get(max_class_id, "unknown")
-    else:
-        return "unknown"
 
 def grasp_callback(msg,combined_pcd):
     # global T_grasps_in_base_list,T_grasps_in_base_list,T_tool_list  # 使用全域變數
@@ -714,7 +584,7 @@ def grasp_callback(msg,combined_pcd):
                         # print(f"抓取姿態 {i} 的物體類型: {class_names_dict[class_id]}")
                         class_in_base_list.append(class_names_dict[class_id])
                         break
-                class_in_base_list.append('unknown')  # 若沒有匹配到任何類別，則標記為 unknown
+                class_in_base_list.append(None)    
                 
             else:
                 print(f"抓取姿態 {i} 的範圍內沒有點雲")
@@ -769,7 +639,7 @@ def grasp_callback(msg,combined_pcd):
                 gripper_base_position, approach, binormal, axis, bbox_id=i,
                 hand_depth=0.07, hand_height=0.02,
                 outer_diameter=0.105, finger_width=0.01,
-                table_z=0.08, frame_id="base"
+                table_z=0.08828, frame_id="base"
             )
         
             if is_danger:
@@ -858,7 +728,7 @@ if __name__ == "__main__":
     rospy.init_node('mask_point_cloud', anonymous=True)
     cloud_publisher=rospy.Publisher('cloud_stitched', PointCloud2, queue_size=10)
 
-    # gripper_pick(pick_distance=0,inital_bool=False)
+    gripper_pick(pick_distance=0,inital_bool=False)
     change_tcp("ChangeTCP(\"robotiq_origin_gripper\")")
     
 
@@ -870,18 +740,13 @@ if __name__ == "__main__":
     PUT_POSE_0=[655.84 , 499.26 , 239.60 , -180.00 , 0.00 , 180] #TCP
     PUT_POSE_1=[459.60 , 499.26 , 239.60 , -180.00 , 0.00 , 180] #TCP
     PUT_POSE_2=[252.89 , 499.26 , 239.60 , -180.00 , 0.00 , 180] #TCP
-    RECYCLE_POSE=[-35.03 , 776.64 , 297.22, 180.00 ,0.00 ,-180.00]#TCP
+    RECYCLE_POSE=[-35.03 , 776.64 , 233.22, 180.00 ,0.00 ,-180.00]#TCP
     
     PUT_DOWN_POSE_0=[655.84 , 499.26 , 207.27 , -180.00 , 0.00 , 180] #TCP
     PUT_DOWN_POSE_1=[459.60 , 499.26 , 207.27 , -180.00 , 0.00 , 180] #TCP
     PUT_DOWN_POSE_2=[252.89 , 499.26 , 207.27 , -180.00 , 0.00 , 180] #TCP
-    # PUT_DOWN_RECYCLE_POSE=[-35.03 , 776.64 , 183.32, 180.00 ,0.00 ,-180.00]
-    move_script_with_monitor(RECYCLE_POSE)
-    # move_script_with_monitor(PUT_POSE_2[:2]+[161.9]+PUT_POSE_2[3:])
-    # move_script_with_monitor(PUT_DOWN_RECYCLE_POSE)
-    gripper_pick(pick_distance=0,inital_bool=False)
-    move_script_with_monitor(RECYCLE_POSE)
-    input('stop')
+    PUT_DOWN_RECYCLE_POSE=[-35.03 , 776.64 , 183.32, 180.00 ,0.00 ,-180.00]
+
     # Create a pipeline
     pipeline = rs.pipeline()
     # Create a config and configure the pipeline to stream
@@ -913,7 +778,6 @@ if __name__ == "__main__":
     align_to = rs.stream.color
     align = rs.align(align_to)
 
-    ply_number=0
     while not rospy.is_shutdown():
     # Streaming loop
         view_point_cloud_list=[]
@@ -969,35 +833,18 @@ if __name__ == "__main__":
             combined_pcd += source
         
         points = np.asarray(combined_pcd.points)
-        # # 設定 Z 值下限
-        # z_threshold = 0.08828
-        # # 建立布林遮罩，只保留 Z 值 >= z_threshold 的點
-        # mask = points[:, 2] >= z_threshold
-        # # 套用遮罩並建立新的點雲物件
-        # filtered_pcd = combined_pcd.select_by_index(np.where(mask)[0])
+        # 設定 Z 值下限
+        z_threshold = 0.07
+        # 建立布林遮罩，只保留 Z 值 >= z_threshold 的點
+        mask = points[:, 2] >= z_threshold
+        # 套用遮罩並建立新的點雲物件
+        filtered_pcd = combined_pcd.select_by_index(np.where(mask)[0])
         
-        # 設定 X, Y, Z 的範圍
-        x_min, x_max = 0.241, 0.680
-        y_min, y_max = -0.33989, 0.16684
-        # z_min,z_max =0.08828 ,0.26677  # 只有下限
-        z_min,z_max =0.08228 ,0.26677  # 只有下限
-        # 建立布林遮罩
-        mask = (
-            (points[:, 0] >= x_min) & (points[:, 0] <= x_max) &  # X 範圍
-            (points[:, 1] >= y_min) & (points[:, 1] <= y_max) &  # Y 範圍
-            (points[:, 2] >= z_min) & (points[:, 1] <= z_max))    # Z 範圍
-        
-        
-        # 根據遮罩選取符合條件的點
-        filtered_indices = np.where(mask)[0]
-        filtered_pcd = combined_pcd.select_by_index(filtered_indices)
-        
-        
-        
-        combined_pcd = filtered_pcd   
-        # cl, ind = combined_pcd.remove_statistical_outlier(nb_neighbors=200, std_ratio=2.0)
+        # combined_pcd = filtered_pcd   
+        # cl, ind = combined_pcd.remove_statistical_outlier(nb_neighbors=50, std_ratio=2.0)
         
         # combined_pcd=combined_pcd.select_by_index(ind)  
+        combined_pcd=filtered_pcd
             
                 
         # 建立座標系
@@ -1012,8 +859,7 @@ if __name__ == "__main__":
         up = [0.0, 0.0, 1.0]
 
         # msg=o3d_to_ros_pointcloud(pcd_combined)
-        o3d.io.write_point_cloud("/home/chen/catkin_ws/src/pcl_with_gpd/ply_save/"+f"{ply_number}.ply", combined_pcd, write_ascii=True)
-        ply_number+=1
+        o3d.io.write_point_cloud("/home/chen/catkin_ws/src/pcl_with_gpd/scripts/test.ply", combined_pcd, write_ascii=True)
         cloud_publisher.publish(o3d_to_ros_pointcloud(combined_pcd))
         # 顯示點雲和座標系
         geometries_to_draw = [combined_pcd] + [axis]
@@ -1047,7 +893,7 @@ if __name__ == "__main__":
         while  not rospy.is_shutdown():
             # color_print("沒有抓取姿態，請檢查輸入訊息", "red")
             # continue
-            msg = rospy.wait_for_message("/detect_grasps/clustered_grasps", GraspConfigList,60)  # 等待接收抓取姿態消息
+            msg = rospy.wait_for_message("/detect_grasps/clustered_grasps", GraspConfigList)  # 等待接收抓取姿態消息
 
             position_in_base_list,sample_in_base_list,class_in_base_list,have_grasps=grasp_callback(msg,voxelize_pcd)  # 處理接收到的消息 
             if input("是否重來？(y/n): ").strip().lower() == 'y':
@@ -1065,7 +911,6 @@ if __name__ == "__main__":
                 best_position= position
                 best_sample= sample
                 best_class=classes 
-                print(f" best_class={best_class}")
                 break
             else: color_print("無法分類，尋找下一個姿態！", "yellow") 
 
@@ -1116,15 +961,12 @@ if __name__ == "__main__":
             move_script_with_monitor(PUT_DOWN_POSE_2)
             gripper_pick(pick_distance=0,inital_bool=True)
             move_script_with_monitor(PUT_POSE_2)
-        elif best_class=='unknown':
+        else:
             color_print(best_class, "yellow")
-            move_script_with_monitor(RECYCLE_POSE)
-            # move_script_with_monitor(PUT_POSE_2[:2]+[161.9]+PUT_POSE_2[3:])
-            # move_script_with_monitor(PUT_DOWN_RECYCLE_POSE)
-            gripper_pick(pick_distance=0,inital_bool=True)
-            move_script_with_monitor(RECYCLE_POSE)
+
         print("下一輪夾取...")
         input('next round .................')
+        
         # cv2.destroyAllWindows()
     pipeline.stop()
 
